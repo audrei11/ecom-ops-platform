@@ -416,8 +416,10 @@ function OrdersSection({
                     {order.customer_name ?? order.customer_email ?? <span className={css.dim}>—</span>}
                   </td>
                   <td className={css.td}>
-                    <span>{itemCount} unit{itemCount !== 1 ? 's' : ''}</span>
-                    {' '}<span className={css.dim}>({order.items.length} line{order.items.length !== 1 ? 's' : ''})</span>
+                    <div>{itemCount} unit{itemCount !== 1 ? 's' : ''}</div>
+                    <div className={css.dim} style={{ fontSize: '0.75rem', marginTop: 2 }}>
+                      {order.items.map(i => `${i.sku} ×${i.quantity}`).join(', ')}
+                    </div>
                   </td>
                   <td className={css.td}>
                     {order.total_price != null
