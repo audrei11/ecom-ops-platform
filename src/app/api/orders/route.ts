@@ -27,8 +27,8 @@ export async function GET(req: NextRequest) {
 }
 
 // =============================================================================
-// POST /api/orders — Step 1: inventory deduction
-// Accepts: { items: [{ sku, qty }], order_id? }
+// POST /api/orders — inventory deduction
+// Accepts: { items: [{ sku, qty }] }
 // =============================================================================
 
 export async function POST(req: Request) {
@@ -57,48 +57,72 @@ export async function POST(req: Request) {
     );
   }
 
-  // ── 3. Process each item ────────────────────────────────────────────────────
+  // ── 3. Resolve all SKUs upfront ─────────────────────────────────────────────
+  const skus = (rawItems as Record<string, unknown>[]).map((i) => String(i.sku ?? ''));
+  const productMap = mockDb.getProductsBySku(skus);
+
+  // ── 4. Loop through items and deduct inventory ──────────────────────────────
   const updated: Array<{
     sku: string;
     qty: number;
-    status: 'reserved' | 'insufficient_stock' | 'sku_not_found';
+    status: 'deducted' | 'insufficient_stock' | 'sku_not_found';
+    stock_before?: number;
+    stock_after?: number;
     available?: number;
   }> = [];
-
-  const skus = (rawItems as Record<string, unknown>[]).map((i) => String(i.sku));
-  const productMap = mockDb.getProductsBySku(skus);
-
-  console.log('[POST /api/orders] Processing', rawItems.length, 'items');
 
   for (const raw of rawItems as Record<string, unknown>[]) {
     const sku = String(raw.sku ?? '');
     const qty = Number(raw.qty ?? raw.quantity ?? 0);
 
-    console.log(`[POST /api/orders] Item: sku=${sku} qty=${qty}`);
+    console.log(`[POST /api/orders] Updating SKU: ${sku}  QTY: ${qty}`);
 
     if (!sku || qty < 1) {
+      console.warn(`[POST /api/orders] Invalid item — sku="${sku}" qty=${qty}`);
       updated.push({ sku, qty, status: 'sku_not_found' });
       continue;
     }
 
     const product = productMap.get(sku);
     if (!product) {
-      console.log(`[POST /api/orders] SKU not found: ${sku}`);
+      console.warn(`[POST /api/orders] SKU not found in DB: ${sku}`);
       updated.push({ sku, qty, status: 'sku_not_found' });
       continue;
     }
 
-    const result = mockDb.reserveInventory(product.id, qty);
-    console.log(`[POST /api/orders] reserveInventory(${sku}, ${qty}):`, result);
+    // Get current inventory snapshot for logging
+    const invBefore = mockDb.getInventoryByProductId(product.id);
+    const availableBefore = invBefore
+      ? invBefore.quantity_on_hand - invBefore.quantity_reserved
+      : 0;
 
-    if (!result.success) {
-      updated.push({ sku, qty, status: 'insufficient_stock', available: result.available });
-    } else {
-      updated.push({ sku, qty, status: 'reserved' });
+    console.log(`[POST /api/orders] Before: available=${availableBefore}`);
+
+    // Deduct from on_hand + add to reserved
+    const deductResult = mockDb.deductInventory(product.id, qty);
+
+    if (!deductResult.success) {
+      console.warn(`[POST /api/orders] Insufficient stock for ${sku} — available: ${deductResult.available}`);
+      updated.push({ sku, qty, status: 'insufficient_stock', available: deductResult.available });
+      continue;
     }
+
+    // Also reserve so dashboard shows correct available count
+    mockDb.reserveInventory(product.id, qty);
+
+    const availableAfter = availableBefore - qty;
+    console.log(`[POST /api/orders] After: available=${availableAfter}`);
+
+    updated.push({
+      sku,
+      qty,
+      status: 'deducted',
+      stock_before: availableBefore,
+      stock_after: availableAfter,
+    });
   }
 
-  console.log('[POST /api/orders] Done. Updated:', JSON.stringify(updated));
+  console.log('[POST /api/orders] Complete:', JSON.stringify(updated));
 
   return new Response(
     JSON.stringify({ success: true, updated }),
