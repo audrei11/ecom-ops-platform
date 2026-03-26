@@ -1,4 +1,5 @@
 import { tryGetDb } from '@/lib/supabase';
+import { getNeonSql } from '@/lib/neon';
 import * as mockDb from '@/lib/mockDb';
 
 import {
@@ -439,9 +440,35 @@ export interface OrderSummary extends Order {
 export async function listOrders(
   options: ListOrdersOptions = {}
 ): Promise<ServiceResult<OrderSummary[]>> {
-  const db = tryGetDb();
   const limit = options.limit ?? 50;
   const offset = options.offset ?? 0;
+
+  const sql = getNeonSql();
+  if (sql) {
+    const orders = options.status
+      ? await sql`select * from orders where status = ${options.status} order by created_at desc limit ${limit} offset ${offset}`
+      : await sql`select * from orders order by created_at desc limit ${limit} offset ${offset}`;
+
+    if (orders.length === 0) return { success: true, data: [] };
+
+    const orderIds = orders.map((o) => o.id as string);
+    const items = await sql`select * from order_items where order_id = any(${orderIds})`;
+
+    const itemsByOrder = new Map<string, OrderItem[]>();
+    for (const item of items) {
+      const existing = itemsByOrder.get(item.order_id as string) ?? [];
+      existing.push(item as unknown as OrderItem);
+      itemsByOrder.set(item.order_id as string, existing);
+    }
+
+    const result: OrderSummary[] = orders.map((o) => ({
+      ...(o as unknown as Order),
+      items: itemsByOrder.get(o.id as string) ?? [],
+    }));
+    return { success: true, data: result };
+  }
+
+  const db = tryGetDb();
 
   if (!db) {
     console.log('[orderService] Using MOCK DB');

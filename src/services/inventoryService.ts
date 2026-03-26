@@ -1,4 +1,5 @@
 import { tryGetDb } from '@/lib/supabase';
+import { getNeonSql } from '@/lib/neon';
 import * as mockDb from '@/lib/mockDb';
 import type {
   InventoryWithAvailable,
@@ -11,6 +12,15 @@ import type {
 // =============================================================================
 
 export async function getAllInventory(): Promise<ServiceResult<InventoryWithAvailable[]>> {
+  const sql = getNeonSql();
+  if (sql) {
+    const rows = await sql`
+      select * from inventory_with_available
+      order by product_name asc
+    `;
+    return { success: true, data: rows as unknown as InventoryWithAvailable[] };
+  }
+
   const db = tryGetDb();
 
   if (!db) {
