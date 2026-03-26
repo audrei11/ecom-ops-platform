@@ -65,16 +65,6 @@ export default async function DashboardPage() {
       </nav>
 
       <main className={css.main}>
-        {!dbReady && (
-          <div className={css.setupBanner}>
-            <IconAlert size={15} />
-            <span>
-              <strong>Running on mock data.</strong>
-              {' '}Copy <code>.env.local.example</code> → <code>.env.local</code>, add{' '}
-              <code>SUPABASE_URL</code> and <code>SUPABASE_SERVICE_ROLE_KEY</code>, then restart.
-            </span>
-          </div>
-        )}
 
         {/* ---- Page header ---- */}
         <div className={css.pageHeader}>
