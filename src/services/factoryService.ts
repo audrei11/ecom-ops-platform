@@ -1,4 +1,5 @@
 import { tryGetDb } from '@/lib/supabase';
+import { getNeonSql } from '@/lib/neon';
 import * as mockDb from '@/lib/mockDb';
 import type { FactoryBatch, ServiceResult } from '@/lib/types';
 
@@ -57,8 +58,81 @@ function cycleEndDate(today: Date, cycleWeeks: number): string {
 export async function batchOrdersByFactory(
   request: BatchOrdersRequest = {}
 ): Promise<ServiceResult<BatchResult>> {
-  const db = tryGetDb();
+  const sql = getNeonSql();
   const orderStatuses = request.order_statuses ?? ['processing'];
+
+  // ---- Neon path -------------------------------------------------------------
+  if (sql) {
+    const eligibleItems = await sql`
+      select oi.id, oi.order_id, oi.product_id, oi.sku, oi.quantity,
+             p.factory_id, f.name as factory_name, f.production_cycle_weeks
+      from order_items oi
+      join orders o on o.id = oi.order_id
+      join products p on p.id = oi.product_id
+      join factories f on f.id = p.factory_id
+      where o.status = any(${orderStatuses})
+      and oi.product_id is not null
+      and oi.id not in (select order_item_id from batch_order_items)
+      ${request.factory_id ? sql`and p.factory_id = ${request.factory_id}` : sql``}
+    `;
+
+    if (eligibleItems.length === 0) {
+      return { success: true, data: { batches_created: 0, batches_updated: 0, items_batched: 0, details: [] } };
+    }
+
+    const byFactory = new Map<string, { factory_id: string; factory_name: string; cycle_weeks: number; items: typeof eligibleItems }>();
+    for (const item of eligibleItems) {
+      const fid = item.factory_id as string;
+      const existing = byFactory.get(fid);
+      if (existing) existing.items.push(item);
+      else byFactory.set(fid, { factory_id: fid, factory_name: item.factory_name as string, cycle_weeks: item.production_cycle_weeks as number, items: [item] });
+    }
+
+    const today = new Date();
+    const details: BatchDetail[] = [];
+    let batchesCreated = 0, batchesUpdated = 0, totalItemsBatched = 0;
+
+    for (const [factoryId, group] of byFactory) {
+      const [openBatch] = await sql`
+        select id, batch_reference, cycle_end_date from factory_batches
+        where factory_id = ${factoryId} and status = 'open'
+        order by created_at desc limit 1`;
+
+      let batchId: string, batchRef: string, cycleEnd: string;
+
+      if (openBatch) {
+        batchId = openBatch.id as string;
+        batchRef = (openBatch.batch_reference as string) ?? `BATCH-${batchId.slice(0, 8)}`;
+        cycleEnd = openBatch.cycle_end_date as string ?? '';
+        batchesUpdated++;
+      } else {
+        batchRef = buildBatchReference(group.factory_name, today);
+        cycleEnd = cycleEndDate(today, group.cycle_weeks);
+        const [newBatch] = await sql`
+          insert into factory_batches (factory_id, batch_reference, cycle_start_date, cycle_end_date, status)
+          values (${factoryId}, ${batchRef}, ${today.toISOString().split('T')[0]}, ${cycleEnd}, 'open')
+          returning id`;
+        batchId = newBatch.id as string;
+        batchesCreated++;
+      }
+
+      for (const item of group.items) {
+        await sql`insert into batch_order_items (batch_id, order_item_id) values (${batchId}, ${item.id as string}) on conflict do nothing`;
+      }
+
+      totalItemsBatched += group.items.length;
+      details.push({ batch_id: batchId, batch_reference: batchRef, factory_name: group.factory_name, items_count: group.items.length, cycle_end_date: cycleEnd });
+    }
+
+    if (totalItemsBatched > 0) {
+      const orderIds = [...new Set(eligibleItems.map(i => i.order_id as string))];
+      await sql`update orders set status = 'batched' where id = any(${orderIds})`;
+    }
+
+    return { success: true, data: { batches_created: batchesCreated, batches_updated: batchesUpdated, items_batched: totalItemsBatched, details } };
+  }
+
+  const db = tryGetDb();
 
   // ---- Mock DB path ----------------------------------------------------------
   if (!db) {
@@ -359,6 +433,15 @@ export async function batchOrdersByFactory(
 export async function listFactoryBatches(
   factoryId?: string
 ): Promise<ServiceResult<FactoryBatch[]>> {
+  const sql = getNeonSql();
+
+  if (sql) {
+    const rows = factoryId
+      ? await sql`select * from factory_batches where factory_id = ${factoryId} order by created_at desc`
+      : await sql`select * from factory_batches order by created_at desc`;
+    return { success: true, data: rows as unknown as FactoryBatch[] };
+  }
+
   const db = tryGetDb();
 
   if (!db) {

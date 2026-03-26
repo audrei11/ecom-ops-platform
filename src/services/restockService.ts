@@ -1,4 +1,5 @@
 import { tryGetDb } from '@/lib/supabase';
+import { getNeonSql } from '@/lib/neon';
 import * as mockDb from '@/lib/mockDb';
 import type { RestockRecommendation, ServiceResult } from '@/lib/types';
 
@@ -146,6 +147,51 @@ export async function calculateRestockRecommendations(
   inputs: RestockInput[] = [],
   windowDays = 30
 ): Promise<ServiceResult<RestockCalculation[]>> {
+  const sql = getNeonSql();
+
+  // ---- Neon path -------------------------------------------------------------
+  if (sql) {
+    const products = inputs.length > 0
+      ? await sql`
+          select p.id, p.sku, p.name, p.lead_time_weeks, p.safety_stock_units,
+                 i.quantity_on_hand, i.quantity_reserved
+          from products p join inventory i on i.product_id = p.id
+          where p.id = any(${inputs.map(i => i.product_id)})`
+      : await sql`
+          select p.id, p.sku, p.name, p.lead_time_weeks, p.safety_stock_units,
+                 i.quantity_on_hand, i.quantity_reserved
+          from products p join inventory i on i.product_id = p.id`;
+
+    if (products.length === 0) return { success: true, data: [] };
+
+    const since = new Date();
+    since.setDate(since.getDate() - windowDays);
+    const productIds = products.map(p => p.id as string);
+
+    const salesData = await sql`
+      select product_id, sum(quantity)::int as total_sold
+      from order_items
+      where product_id = any(${productIds})
+      and created_at >= ${since.toISOString()}
+      group by product_id`;
+
+    const salesByProduct = new Map<string, number>();
+    for (const sale of salesData) {
+      salesByProduct.set(sale.product_id as string, Number(sale.total_sold));
+    }
+
+    const recommendations = products.map(p => {
+      const currentStock = (p.quantity_on_hand as number) - (p.quantity_reserved as number);
+      return computeRestock(
+        { id: p.id as string, sku: p.sku as string, name: p.name as string, lead_time_weeks: p.lead_time_weeks as number, safety_stock_units: p.safety_stock_units as number, current_stock: currentStock },
+        salesByProduct.get(p.id as string) ?? 0,
+        windowDays
+      );
+    });
+
+    return { success: true, data: sortByUrgency(recommendations) };
+  }
+
   const db = tryGetDb();
 
   // ---- Mock DB path ----------------------------------------------------------
